@@ -1,0 +1,53 @@
+name: Build Magisk Module
+
+on:
+  workflow_dispatch:      # 允许手动触发
+  push:
+    branches: [ main ]    # push 到 main 时自动构建
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # 主程序用 stable 编译, eBPF 程序必须用 nightly (-Zbuild-std=core 是不稳定特性)
+      - name: Install Rust toolchains
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup toolchain install nightly --profile minimal --component rust-src
+          rustup target add aarch64-linux-android
+
+      # 官方预编译 bpf-linker, 免去安装整套 LLVM 开发库
+      - name: Install bpf-linker (prebuilt)
+        run: |
+          curl -sSLO https://github.com/aya-rs/bpf-linker/releases/latest/download/bpf-linker-x86_64-unknown-linux-musl.tar.zst
+          mkdir -p "$HOME/.local/bin"
+          tar -xpf bpf-linker-*.tar.zst -C "$HOME/.local/bin"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      # Android NDK 提供交叉编译到手机的 clang 链接器
+      - name: Setup Android NDK r27c
+        run: |
+          curl -sSLO https://dl.google.com/android/repository/android-ndk-r27c-linux.zip
+          unzip -q android-ndk-r27c-linux.zip -d "$HOME"
+          echo "ANDROID_NDK_HOME=$HOME/android-ndk-r27c" >> "$GITHUB_ENV"
+
+      # 先编译 eBPF 内核态程序 -> ebpf_target.o (主程序通过 include_bytes! 内嵌它)
+      - name: Build eBPF object
+        run: |
+          (cd ebpf && cargo +nightly build --release --target bpfel-unknown-none -Z build-std=core)
+          cp ebpf/target/bpfel-unknown-none/release/aether-ebpf ebpf_target.o
+          ls -la ebpf_target.o
+
+      # build.py: 编译主程序(交叉到 aarch64-linux-android) + 打包 Magisk 模块 zip
+      - name: Build & package module
+        run: python3 build.py
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Aether-OptExt
+          path: out/*.zip
+          if-no-files-found: error
